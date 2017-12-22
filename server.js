@@ -4,6 +4,7 @@ const util= require( "util")
 const fs= require( "fs")
 const http2= require( "http2")
 const URL= require( "url").URL
+const Tar= require( "tar-stream")
 
 const open= util.promisify( fs.open)
 const close= util.promisify( fs.close)
@@ -16,39 +17,43 @@ const close= util.promisify( fs.close)
 const server= http2.createServer()
 
 /**
+* @var
+* @global
+*/
+const tar= tar.pack()
+
+/**
 * A list of active http2 sessions, which will receive pushed assets
 * @var
 * @global
 */
-const sessions= new WeakMap()
-/**
-* Look at a stream and create a new httpzstd session or attach the existing one, as applicable
-* @var
-* @global
-*/
-function httpzstdSession( stream){
-	const session= stream.session
-	const existing= sessions.get( session)
-	const created= existing|| {
-		session,
-		stream,
-		sequence: 0
+const sessions= Map()
+function saveStream( stream){
+	if( !stream.pushAllowed){
+		return
 	}
-	if( created!== existing){
-		sessions.set( created)
-	}else{
-		// up date the stream we'll push in reply to to this more-recent stream
-		existing.stream= stream
+
+	var session= stream.session
+	// see if we know this session
+	var existingStream= sessions.get( session)
+	if( !existingStream){
+		// remove our record of the session when it's done
+		function unsave(){
+			// GEE IT SURE WOULD BE NICE TO BE ABLE TO USE WEAKMAP TO FREE US FROM RESPONSIBLY GC'ing OURSELVES
+			sessions.delete( session)
+			// remove this handler's installs
+			session.remove( "close", unsave)
+			session.remove( "goaway", unsave)
+			// it's the only way to be sure
+			session= null
+		}
+		session.on( "close", unsave)
+		session.on( "goaway", unsave)
 	}
-	return created
+
+	// record
+	sessions.set( stream.session, stream)
 }
-/**
-* Remove a stream as it closes
-* @listens close
-*/
-server.on("close", (session)=> {
-	sessions.delete( session)
-})
 
 server.on("stream", (stream, headers, flags)=> {
 	const url= new URL(headers[http2.constants.HTTP2_HEADER_PATH])
@@ -59,7 +64,7 @@ server.on("stream", (stream, headers, flags)=> {
 		retun
 	}
 
-	httpzstdSession( stream)
+	saveStream( stream)
 	// ... explicitly do nothing, leaving this request open to "encourage" the http2 stream to stay open, ready for push
 })
 
@@ -76,14 +81,16 @@ async function submit(stream, headers, flags, url){
 		return
 	}
 	const fd= await open( path)
-	const headers= {
-		":path": null
-	}
 	const all= sessions.values().map(session=> {
-		headers[":path"]= "/httpzstd/" + session.sequence++
 		// push the submitted file to each client
-		// next we are going to push zstd buffers! yay!
-		session.respondWithFD( fd, headers)
+		const path= "/httpzstd/" + session.sequence++
+		return util.promisify( session.stream.pushStream.bind( session.stream))
+			.then( pushStream=> {
+				const headers= {
+					":path": path
+				}
+				pushStream.respondWithFD( fd, headers)
+			})
 	})
 	return Promise.all(all).then(_=> close( fd))
 }
