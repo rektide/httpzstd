@@ -124,7 +124,7 @@ async function startFlushing(){
 	// read first file
 	var
 	  name= fileQueue.shift(),
-	  fd= await open( name, 'r'),
+	  fd= await open( "./"+ name, 'r'),
 	  stat= await fstat( fd),
 	  read= fs.createReadStream( null, { fd})
 
