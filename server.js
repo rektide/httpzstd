@@ -22,17 +22,13 @@ const server= http2.createServer()
 * @global
 */
 const tar= tar.pack()
+const seq= 0
 /**
 * List of files needing to be sent
 */
 const fileQueue= []
 
-/**
-* A list of active http2 sessions, which will receive pushed assets
-* @var
-* @global
-*/
-const sessions= Map()
+const pushStreams= Map()
 function saveStream( stream){
 	if( !stream.pushAllowed){
 		return
@@ -40,24 +36,32 @@ function saveStream( stream){
 
 	var session= stream.session
 	// see if we know this session
-	var existingStream= sessions.get( session)
-	if( !existingStream){
-		// remove our record of the session when it's done
-		function unsave(){
-			// GEE IT SURE WOULD BE NICE TO BE ABLE TO USE WEAKMAP TO FREE US FROM RESPONSIBLY GC'ing OURSELVES
-			sessions.delete( session)
-			// remove this handler's installs
-			session.remove( "close", unsave)
-			session.remove( "goaway", unsave)
-			// it's the only way to be sure
-			session= null
-		}
-		session.on( "close", unsave)
-		session.on( "goaway", unsave)
+	var existingStream= pushStreams.get( session)
+	if( existingStream){
+		return
 	}
 
-	// record
-	sessions.set( stream.session, stream)
+	// remove our record of the session when it's done
+	function unsave(){
+		// GEE IT SURE WOULD BE NICE TO BE ABLE TO USE WEAKMAP TO FREE US FROM RESPONSIBLY GC'ing OURSELVES
+		sessions.delete( session)
+		// remove this handler's installs
+		session.remove( "close", unsave)
+		session.remove( "goaway", unsave)
+		// it's the only way to be sure
+		session= null
+	}
+	session.on( "close", unsave)
+	session.on( "goaway", unsave)
+
+	stream.pushStream({
+		":path": "/httpzstd/"+ seq
+	}, pushStream=> {
+		pushStream.respond({ ":status": 200})
+		// add to list of pushStreams
+		pushStreams.set( session, pushStream)
+	})
+	
 }
 
 server.on( "stream", (stream, headers, flags)=> {
@@ -86,12 +90,12 @@ async function submit(stream, headers, flags, url){
 		return
 	}
 	fileQueue.push( path)
-	maybeStartFlushing()
+	startFlushing()
 }
 
 
 var isRunning= false
-async function maybeStartFlushing(){
+async function startFlushing(){
 	if( isRunning){
 		return
 	}
@@ -118,6 +122,12 @@ async function maybeStartFlushing(){
 	read.on( "data", entry.write.bind( entry))
 	read.on( "end", finalize)
 }
+
+tar.on( "data", function( data){
+	for( var pushStream of pushStreams.values()){
+		pushStream.write( data)
+	}
+})
 
 //		const path= "/httpzstd/" + session.sequence++
 //		return util.promisify( session.stream.pushStream.bind( session.stream))
