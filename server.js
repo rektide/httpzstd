@@ -5,9 +5,10 @@ const fs= require( "fs")
 const http2= require( "http2")
 const URL= require( "url").URL
 const Tar= require( "tar-stream")
+const zstd= require( "node-zstd2")
 
 const open= util.promisify( fs.open)
-const close= util.promisify( fs.close)
+const fstat= util.promisify( fs.fstat)
 
 /**
 * Our http/2 server instance
@@ -21,7 +22,7 @@ const server= http2.createServer()
 * @var
 * @global
 */
-const tar= tar.pack()
+const tar= Tar.pack()
 const seq= 0
 /**
 * List of files needing to be sent
@@ -55,13 +56,16 @@ function saveStream( stream){
 	session.on( "goaway", unsave)
 
 	stream.pushStream({
-		":path": "/httpzstd/"+ seq
+		":path": "/httpzstd/"+ seq // does not signify anything in particular
 	}, pushStream=> {
+		// ok to begin sending stream to client
 		pushStream.respond({ ":status": 200})
-		// add to list of pushStreams
-		pushStreams.set( session, pushStream)
+
+		// generate zstd stream
+		var zstream= zstd.compressStream()
+		// add to list of all pushstreams
+		pushStreams.set( session, zstream)
 	})
-	
 }
 
 server.on( "stream", (stream, headers, flags)=> {
@@ -89,7 +93,12 @@ async function submit(stream, headers, flags, url){
 		stream.end("");
 		return
 	}
+	// Perhaps we should try to open & stat the file & return a status basd on that?
 	fileQueue.push( path)
+	// no real reply offered in this demo server
+	stream.end()
+
+	// Make sure file queue is being run
 	startFlushing()
 }
 
@@ -102,12 +111,20 @@ async function startFlushing(){
 	if( !fileQueue.length){
 		return
 	}
+	if( !pushStreams.length){
+		return
+	}
+
+	// read first file
 	var
 	  name= fileQueue.shift(),
 	  fd= await open( name, 'r'),
 	  stat= await fstat( fd),
-	  entry= tar.entry({ name, size: stat.size}),
 	  read= fs.createReadStream( null, { fd})
+
+	// send file to tar entry
+	++seq
+	var entry= tar.entry({ name, size: stat.size})
 	function finalize(){
 		// finish this entry
 		entry.end()
@@ -119,8 +136,8 @@ async function startFlushing(){
 		isRunning= false
 		maybeStartFlushing() // do start flushing
 	}
-	read.on( "data", entry.write.bind( entry))
 	read.on( "end", finalize)
+	read.on( "data", entry.write.bind( entry))
 }
 
 tar.on( "data", function( data){
@@ -128,17 +145,5 @@ tar.on( "data", function( data){
 		pushStream.write( data)
 	}
 })
-
-//		const path= "/httpzstd/" + session.sequence++
-//		return util.promisify( session.stream.pushStream.bind( session.stream))
-//			.then( pushStream=> {
-//				const headers= {
-//					":path": path
-//				}
-//				pushStream.respondWithFD( fd, headers)
-//			})
-//	})
-//	return Promise.all(all).then(_=> close( fd))
-//}
 
 server.listen(process.env.HTTZSTD_PORT|| process.env.NODE_PORT|| process.env.PORT, 80)
