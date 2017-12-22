@@ -12,5 +12,8 @@
 	},
 	"keywords": [],
 	"author": "rektide de la faye",
-	"license": "X11"
+	"license": "X11",
+	"dependencies": {
+		"tar-fs": "^1.16.0"
+	}
 }

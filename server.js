@@ -17,10 +17,15 @@ const close= util.promisify( fs.close)
 const server= http2.createServer()
 
 /**
+* Stream of tar entries
 * @var
 * @global
 */
 const tar= tar.pack()
+/**
+* List of files needing to be sent
+*/
+const fileQueue= []
 
 /**
 * A list of active http2 sessions, which will receive pushed assets
@@ -55,7 +60,7 @@ function saveStream( stream){
 	sessions.set( stream.session, stream)
 }
 
-server.on("stream", (stream, headers, flags)=> {
+server.on( "stream", (stream, headers, flags)=> {
 	const url= new URL(headers[http2.constants.HTTP2_HEADER_PATH])
 
 	// submit route
@@ -80,19 +85,50 @@ async function submit(stream, headers, flags, url){
 		stream.end("");
 		return
 	}
-	const fd= await open( path)
-	const all= sessions.values().map(session=> {
-		// push the submitted file to each client
-		const path= "/httpzstd/" + session.sequence++
-		return util.promisify( session.stream.pushStream.bind( session.stream))
-			.then( pushStream=> {
-				const headers= {
-					":path": path
-				}
-				pushStream.respondWithFD( fd, headers)
-			})
-	})
-	return Promise.all(all).then(_=> close( fd))
+	fileQueue.push( path)
+	maybeStartFlushing()
 }
+
+
+var isRunning= false
+async function maybeStartFlushing(){
+	if( isRunning){
+		return
+	}
+	if( !fileQueue.length){
+		return
+	}
+	var
+	  name= fileQueue.shift(),
+	  fd= await open( name, 'r'),
+	  stat= await fstat( fd),
+	  entry= tar.entry({ name, size: stat.size}),
+	  read= fs.createReadStream( null, { fd})
+	function finalize(){
+		// finish this entry
+		entry.end()
+		// explicit gc
+		entry= null
+		read.removeAllListeners()
+
+		// loop
+		isRunning= false
+		maybeStartFlushing() // do start flushing
+	}
+	read.on( "data", entry.write.bind( entry))
+	read.on( "end", finalize)
+}
+
+//		const path= "/httpzstd/" + session.sequence++
+//		return util.promisify( session.stream.pushStream.bind( session.stream))
+//			.then( pushStream=> {
+//				const headers= {
+//					":path": path
+//				}
+//				pushStream.respondWithFD( fd, headers)
+//			})
+//	})
+//	return Promise.all(all).then(_=> close( fd))
+//}
 
 server.listen(process.env.HTTZSTD_PORT|| process.env.NODE_PORT|| process.env.PORT, 80)
