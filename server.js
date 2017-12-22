@@ -29,7 +29,8 @@ const seq= 0
 */
 const fileQueue= []
 
-const pushStreams= Map()
+const pushStreams= new Map()
+const pendingPushes= new Map()
 function saveStream( stream){
 	if( !stream.pushAllowed){
 		return
@@ -63,8 +64,8 @@ function saveStream( stream){
 
 		// generate zstd stream
 		var zstream= zstd.compressStream()
-		// add to list of all pushstreams
-		pushStreams.set( session, zstream)
+		// add to list of pending pushStreams
+		pendingPushes.set( stream, zstream)
 	})
 }
 
@@ -78,7 +79,7 @@ server.on( "stream", (stream, headers, flags)=> {
 	}
 
 	saveStream( stream)
-	// ... explicitly do nothing, leaving this request open to "encourage" the http2 stream to stay open, ready for push
+	startFlushing()
 })
 
 /**
@@ -106,10 +107,15 @@ async function submit(stream, headers, flags, url){
 var isRunning= false
 async function startFlushing(){
 	if( isRunning){
+		// processing already began
 		return
 	}
 	if( !fileQueue.length){
 		return
+	}
+	for( var [session, pushStream] of pendingPushes){
+		pushStreams.add( session, pushStream)
+		pendingPushes.clear()
 	}
 	if( !pushStreams.length){
 		return
@@ -134,7 +140,7 @@ async function startFlushing(){
 
 		// loop
 		isRunning= false
-		maybeStartFlushing() // do start flushing
+		startFlushing() // do start flushing
 	}
 	read.on( "end", finalize)
 	read.on( "data", entry.write.bind( entry))
